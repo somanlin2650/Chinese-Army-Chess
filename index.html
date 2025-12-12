@@ -1,0 +1,1356 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>軍棋 Luzhanqi - 雙人連線版（免後端 / WebRTC）</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lz-string@1.5.0/libs/lz-string.min.js"></script>
+  <style>
+    * { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+    body { font-family: 'Microsoft JhengHei', 'PingFang TC', sans-serif; }
+    .piece { transition: all 0.15s ease; }
+    .piece:active { transform: scale(0.95); }
+    .cell-highlight { animation: pulse 1s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    .shake { animation: shake 0.5s; }
+    @keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
+    .camp { clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%); }
+    .headquarters { border-radius: 0; clip-path: polygon(20% 0%, 80% 0%, 100% 20%, 100% 80%, 80% 100%, 20% 100%, 0% 80%, 0% 20%); }
+    .railway-h::before { content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 3px; background: repeating-linear-gradient(90deg, #666 0px, #666 8px, transparent 8px, transparent 12px); transform: translateY(-50%); }
+    .railway-v::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 3px; background: repeating-linear-gradient(0deg, #666 0px, #666 8px, transparent 8px, transparent 12px); transform: translateX(-50%); }
+    .railway-cross::before { content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 3px; background: repeating-linear-gradient(90deg, #666 0px, #666 8px, transparent 8px, transparent 12px); transform: translateY(-50%); }
+    .railway-cross::after { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 3px; background: repeating-linear-gradient(0deg, #666 0px, #666 8px, transparent 8px, transparent 12px); transform: translateX(-50%); }
+    .loading { display: inline-block; width: 20px; height: 20px; border: 3px solid rgba(255,255,255,.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s ease-in-out infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    textarea { -webkit-text-size-adjust: 100%; }
+  </style>
+</head>
+
+<body class="bg-gradient-to-b from-amber-50 to-amber-100 min-h-screen">
+  <!-- 首頁 -->
+  <div id="homePage" class="min-h-screen flex flex-col items-center justify-center p-4">
+    <h1 class="text-3xl font-bold text-amber-800 mb-2">🎖️ 軍棋 Luzhanqi</h1>
+    <p class="text-amber-600 mb-8">雙人連線版（免後端 / WebRTC P2P）</p>
+
+    <div class="space-y-4 w-full max-w-xs">
+      <button id="createRoomBtn" onclick="createRoom()" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-4 px-6 rounded-xl shadow-lg text-lg flex items-center justify-center gap-2">
+        <span>🏠 建立房間</span>
+      </button>
+      <button onclick="showJoinModal()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-6 rounded-xl shadow-lg text-lg">
+        🚪 加入房間
+      </button>
+    </div>
+
+    <div class="mt-8 text-amber-700 text-sm text-center max-w-xs space-y-1">
+      <p>📱 支援手機直向遊玩</p>
+      <p>✅ 不使用 jsonblob，因此不會遇到 CORS</p>
+      <p class="text-amber-600">提示：加入者需要把「回傳碼」傳回給建立者完成連線</p>
+    </div>
+  </div>
+
+  <!-- 加入房間 Modal -->
+  <div id="joinModal" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 hidden z-50">
+    <div class="bg-white rounded-2xl p-6 w-full max-w-sm shadow-2xl">
+      <h2 class="text-xl font-bold text-gray-800 mb-4">加入房間</h2>
+      <textarea id="roomCodeInput" rows="5" placeholder="貼上房間代碼（Offer）或開啟朋友分享的連結" class="w-full border-2 border-gray-300 rounded-xl px-4 py-3 text-sm leading-relaxed focus:border-blue-500 focus:outline-none mb-4"></textarea>
+      <div class="flex gap-3">
+        <button onclick="hideJoinModal()" class="flex-1 bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-3 px-4 rounded-xl">取消</button>
+        <button onclick="joinRoomByCode()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-xl">加入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 等待房間 / 大廳 -->
+  <div id="lobbyPage" class="min-h-screen flex flex-col items-center p-4 hidden">
+    <h2 class="text-2xl font-bold text-amber-800 mt-4 mb-2">🎖️ 軍棋房間</h2>
+
+    <div id="connectionCard" class="bg-white rounded-xl p-4 shadow-lg mb-4 w-full max-w-md">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <p class="text-gray-600 text-sm mb-1">連線狀態</p>
+          <p id="connectionStatus" class="text-sm font-medium"></p>
+        </div>
+        <button onclick="copyShareLink()" class="bg-amber-100 hover:bg-amber-200 text-amber-800 py-2 px-3 rounded-lg text-sm font-medium whitespace-nowrap">
+          📤 分享連結
+        </button>
+      </div>
+
+      <!-- Host: Offer code -->
+      <div id="offerArea" class="mt-4 hidden">
+        <p class="text-gray-600 text-sm mb-1">房間代碼（Offer）</p>
+        <textarea id="roomCodeDisplay" rows="4" readonly class="w-full font-mono text-xs border rounded-lg p-3 bg-gray-50"></textarea>
+        <div class="flex gap-2 mt-2">
+          <button onclick="copyRoomCode()" class="flex-1 bg-amber-100 hover:bg-amber-200 text-amber-800 py-2 px-3 rounded-lg text-sm font-medium">📋 複製房間代碼</button>
+        </div>
+
+        <div class="mt-4">
+          <p class="text-gray-600 text-sm mb-1">貼上對手回傳碼（Answer）完成連線</p>
+          <textarea id="answerInput" rows="4" placeholder="對手回傳的 Answer" class="w-full font-mono text-xs border rounded-lg p-3"></textarea>
+          <div class="flex gap-2 mt-2">
+            <button id="applyAnswerBtn" onclick="applyAnswerFromUI()" class="flex-1 bg-red-600 hover:bg-red-700 text-white py-2 px-3 rounded-lg text-sm font-bold">🔗 完成連線</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Guest: Answer code -->
+      <div id="answerArea" class="mt-4 hidden">
+        <p class="text-gray-600 text-sm mb-1">你的回傳碼（Answer）</p>
+        <textarea id="answerCodeDisplay" rows="4" readonly class="w-full font-mono text-xs border rounded-lg p-3 bg-gray-50"></textarea>
+        <div class="flex gap-2 mt-2">
+          <button onclick="copyAnswerCode()" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded-lg text-sm font-bold">📋 複製回傳碼</button>
+        </div>
+        <p class="text-xs text-gray-500 mt-2">請把回傳碼傳給建立房間的玩家（紅方）</p>
+      </div>
+    </div>
+
+    <div id="lobbyStatus" class="bg-blue-100 text-blue-800 px-4 py-2 rounded-lg mb-4 text-center w-full max-w-md"></div>
+
+    <div class="bg-white rounded-xl p-4 shadow-lg w-full max-w-md mb-4">
+      <p class="font-bold text-gray-800 mb-2">玩家狀態</p>
+      <div class="space-y-2">
+        <div class="flex items-center justify-between p-2 bg-red-50 rounded-lg">
+          <span class="text-red-700 font-medium">🔴 紅方</span>
+          <span id="redStatus" class="text-sm text-gray-600">等待中...</span>
+        </div>
+        <div class="flex items-center justify-between p-2 bg-blue-50 rounded-lg">
+          <span class="text-blue-700 font-medium">🔵 藍方</span>
+          <span id="blueStatus" class="text-sm text-gray-600">等待中...</span>
+        </div>
+      </div>
+    </div>
+
+    <p id="myColorDisplay" class="text-lg font-bold mb-4"></p>
+
+    <button id="readyBtn" onclick="toggleReady()" class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-8 rounded-xl shadow-lg hidden">
+      ✅ 準備就緒
+    </button>
+
+    <button onclick="backToHome()" class="mt-4 text-gray-500 hover:text-gray-700 text-sm">← 返回首頁</button>
+  </div>
+
+  <!-- 遊戲頁面 -->
+  <div id="gamePage" class="min-h-screen flex flex-col items-center p-2 hidden">
+    <div class="w-full max-w-md">
+      <!-- 頂部資訊 -->
+      <div class="flex justify-between items-center mb-2 px-2">
+        <div id="gameRoomCode" class="text-xs text-amber-700 font-mono"></div>
+        <div id="turnIndicator" class="text-sm font-bold px-3 py-1 rounded-full"></div>
+        <div id="myColorBadge" class="text-xs font-bold px-2 py-1 rounded"></div>
+      </div>
+
+      <!-- 訊息提示 -->
+      <div id="gameMessage" class="text-center py-2 px-4 rounded-lg mb-2 text-sm font-medium"></div>
+
+      <!-- 棋盤容器 -->
+      <div id="boardContainer" class="relative bg-amber-200 rounded-xl p-2 shadow-xl">
+        <div id="board" class="grid grid-cols-5 gap-1"></div>
+      </div>
+
+      <!-- 被吃掉的棋子 -->
+      <div class="mt-3 bg-white/50 rounded-lg p-2">
+        <p class="text-xs text-gray-600 mb-1">已陣亡棋子</p>
+        <div id="capturedPieces" class="flex flex-wrap gap-1 min-h-6"></div>
+      </div>
+
+      <div class="mt-3 flex justify-center">
+        <button onclick="backToLobby()" class="text-gray-600 hover:text-gray-800 text-sm">← 返回大廳</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 遊戲結束 Modal -->
+  <div id="gameOverModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4 hidden z-50">
+    <div class="bg-white rounded-2xl p-8 w-full max-w-sm shadow-2xl text-center">
+      <div id="gameOverIcon" class="text-6xl mb-4"></div>
+      <h2 id="gameOverTitle" class="text-2xl font-bold mb-2"></h2>
+      <p id="gameOverMessage" class="text-gray-600 mb-6"></p>
+      <button onclick="backToHome()" class="bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 px-8 rounded-xl">返回首頁</button>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="fixed bottom-20 left-1/2 -translate-x-1/2 bg-gray-800 text-white px-4 py-2 rounded-lg shadow-lg hidden z-50 text-sm"></div>
+
+  <script>
+    // ==================== 遊戲常量 ====================
+    const PIECE_TYPES = {
+      COMMANDER: { name: '司令', rank: 9, count: 1 },
+      GENERAL: { name: '軍長', rank: 8, count: 1 },
+      DIVISION: { name: '師長', rank: 7, count: 2 },
+      BRIGADE: { name: '旅長', rank: 6, count: 2 },
+      REGIMENT: { name: '團長', rank: 5, count: 2 },
+      BATTALION: { name: '營長', rank: 4, count: 2 },
+      COMPANY: { name: '連長', rank: 3, count: 3 },
+      PLATOON: { name: '排長', rank: 2, count: 3 },
+      ENGINEER: { name: '工兵', rank: 1, count: 3, special: 'engineer' },
+      BOMB: { name: '炸彈', rank: 0, count: 2, special: 'bomb' },
+      LANDMINE: { name: '地雷', rank: 0, count: 3, special: 'mine', immovable: true },
+      FLAG: { name: '軍旗', rank: 0, count: 1, special: 'flag', immovable: true }
+    };
+
+    const CAMPS = [
+      {x:1, y:2}, {x:3, y:2}, {x:2, y:3}, {x:1, y:4}, {x:3, y:4},
+      {x:1, y:7}, {x:3, y:7}, {x:2, y:8}, {x:1, y:9}, {x:3, y:9}
+    ];
+
+    const HEADQUARTERS = [
+      {x:1, y:0}, {x:3, y:0},
+      {x:1, y:11}, {x:3, y:11}
+    ];
+
+    function isRailway(x, y) {
+      if (x === 0 || x === 4) {
+        if (y >= 1 && y <= 10) return true;
+      }
+      if (y === 1 || y === 5 || y === 6 || y === 10) {
+        if (x >= 0 && x <= 4) return true;
+      }
+      return false;
+    }
+    function isCamp(x, y) { return CAMPS.some(c => c.x === x && c.y === y); }
+    function isHeadquarters(x, y) { return HEADQUARTERS.some(h => h.x === x && h.y === y); }
+    function isRedHeadquarters(x, y) { return (x === 1 && y === 0) || (x === 3 && y === 0); }
+    function isBlueHeadquarters(x, y) { return (x === 1 && y === 11) || (x === 3 && y === 11); }
+
+    // ==================== WebRTC（免後端） ====================
+    const RTC_CONFIG = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
+    };
+
+    function encodeDesc(desc) {
+      const json = JSON.stringify(desc);
+      // compressToEncodedURIComponent 方便放在網址 hash
+      return LZString.compressToEncodedURIComponent(json);
+    }
+
+    function decodeDesc(code) {
+      const json = LZString.decompressFromEncodedURIComponent(code.trim());
+      if (!json) throw new Error('代碼解壓失敗（可能被截斷或不是正確代碼）');
+      return JSON.parse(json);
+    }
+
+    function waitIceComplete(pc) {
+      if (pc.iceGatheringState === 'complete') return Promise.resolve();
+      return new Promise((resolve) => {
+        const onState = () => {
+          if (pc.iceGatheringState === 'complete') {
+            pc.removeEventListener('icegatheringstatechange', onState);
+            resolve();
+          }
+        };
+        pc.addEventListener('icegatheringstatechange', onState);
+        // fallback timeout
+        setTimeout(resolve, 4000);
+      });
+    }
+
+    // ==================== 遊戲狀態 ====================
+    let gameState = resetState();
+
+    function resetState() {
+      return {
+        roomCode: null, // offer code（建立者才有）
+        answerCode: null, // answer code（加入者才有）
+        myColor: null,
+        myPlayerId: null,
+        role: null, // 'host' | 'guest'
+        connected: false,
+
+        players: { red: null, blue: null },
+        board: createEmptyBoard(),
+        currentTurn: 'red',
+        phase: 'home', // 'home' | 'waiting' | 'playing' | 'ended'
+        winner: null,
+        captured: { red: [], blue: [] },
+
+        // WebRTC
+        pc: null,
+        dc: null
+      };
+    }
+
+    let selectedCell = null;
+    let validMoves = [];
+
+    function isHost() { return gameState.role === 'host'; }
+
+    function safeCloseRTC() {
+      try { if (gameState.dc) gameState.dc.close(); } catch {}
+      try { if (gameState.pc) gameState.pc.close(); } catch {}
+      gameState.dc = null;
+      gameState.pc = null;
+      gameState.connected = false;
+    }
+
+    function setupPeerCommon(pc) {
+      pc.onconnectionstatechange = () => {
+        updateConnectionStatus();
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
+          gameState.connected = false;
+          updateConnectionStatus();
+        }
+      };
+    }
+
+    function setupDataChannel(dc) {
+      gameState.dc = dc;
+
+      dc.onopen = () => {
+        gameState.connected = true;
+        updateConnectionStatus();
+        sendNet({ type: 'hello', color: gameState.myColor, playerId: gameState.myPlayerId });
+
+        // host 會在收到 guest hello 後 broadcast state
+        // guest 收到 host state 後更新 UI
+      };
+
+      dc.onclose = () => {
+        gameState.connected = false;
+        updateConnectionStatus();
+      };
+
+      dc.onerror = () => {
+        gameState.connected = false;
+        updateConnectionStatus();
+      };
+
+      dc.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(evt.data);
+          handleNetMessage(msg);
+        } catch (e) {
+          console.warn('訊息解析失敗', e);
+        }
+      };
+    }
+
+    function sendNet(obj) {
+      if (!gameState.dc || gameState.dc.readyState !== 'open') return;
+      gameState.dc.send(JSON.stringify(obj));
+    }
+
+    function broadcastState() {
+      if (!isHost()) return;
+      sendNet({ type: 'state', state: serializeState() });
+    }
+
+    function serializeState() {
+      return {
+        players: gameState.players,
+        board: gameState.board,
+        currentTurn: gameState.currentTurn,
+        phase: gameState.phase,
+        winner: gameState.winner,
+        captured: gameState.captured
+      };
+    }
+
+    function applyStateFromHost(state) {
+      gameState.players = state.players;
+      gameState.board = state.board;
+      gameState.currentTurn = state.currentTurn;
+      gameState.phase = state.phase;
+      gameState.winner = state.winner;
+      gameState.captured = state.captured || { red: [], blue: [] };
+
+      // UI 更新
+      if (gameState.phase === 'playing') {
+        showGame();
+        selectedCell = null;
+        validMoves = [];
+        renderBoard();
+        updateGameUI();
+      } else if (gameState.phase === 'ended') {
+        showGame();
+        renderBoard();
+        updateGameUI();
+        showGameOver(gameState.winner);
+      } else {
+        showLobby();
+      }
+
+      updateLobbyUI();
+      updateGameUI();
+    }
+
+    function handleNetMessage(msg) {
+      if (!msg || !msg.type) return;
+
+      if (msg.type === 'hello') {
+        const { color, playerId } = msg;
+        if (!color || !playerId) return;
+
+        // 建立玩家資訊
+        if (color === 'red') {
+          gameState.players.red = { id: playerId, ready: gameState.players.red?.ready ?? false };
+        } else if (color === 'blue') {
+          gameState.players.blue = { id: playerId, ready: gameState.players.blue?.ready ?? false };
+        }
+
+        updateLobbyUI();
+        updateConnectionStatus();
+
+        if (isHost()) {
+          // host 確認 blue 加入後，廣播 state
+          if (gameState.players.blue) {
+            gameState.phase = gameState.phase === 'home' ? 'waiting' : gameState.phase;
+            broadcastState();
+          }
+        }
+        return;
+      }
+
+      if (msg.type === 'state') {
+        // guest 接收 host 權威狀態
+        if (isHost()) return;
+        applyStateFromHost(msg.state);
+        return;
+      }
+
+      if (msg.type === 'ready') {
+        // host 接收 guest ready
+        if (!isHost()) return;
+        const { color, ready } = msg;
+        if (color !== 'blue') return;
+        if (!gameState.players.blue) gameState.players.blue = { id: 'blue', ready: false };
+        gameState.players.blue.ready = !!ready;
+        updateLobbyUI();
+
+        if (gameState.players.red?.ready && gameState.players.blue?.ready) {
+          startGameHost();
+        } else {
+          gameState.phase = 'waiting';
+          broadcastState();
+        }
+        return;
+      }
+
+      if (msg.type === 'move') {
+        if (!isHost()) return;
+        const { from, to, color } = msg;
+        if (color !== 'blue') return;
+        if (!from || !to) return;
+        hostTryMove(from.x, from.y, to.x, to.y, 'blue');
+        return;
+      }
+    }
+
+    async function createRoom() {
+      // Host（紅方）
+      safeCloseRTC();
+      selectedCell = null;
+      validMoves = [];
+
+      gameState = resetState();
+      gameState.role = 'host';
+      gameState.myColor = 'red';
+      gameState.myPlayerId = generatePlayerId();
+      gameState.players.red = { id: gameState.myPlayerId, ready: false };
+      gameState.players.blue = null;
+      gameState.board = createEmptyBoard();
+      gameState.currentTurn = 'red';
+      gameState.phase = 'waiting';
+      gameState.captured = { red: [], blue: [] };
+
+      const btn = document.getElementById('createRoomBtn');
+      btn.innerHTML = '<span class="loading"></span> 建立中...';
+      btn.disabled = true;
+
+      try {
+        const pc = new RTCPeerConnection(RTC_CONFIG);
+        gameState.pc = pc;
+        setupPeerCommon(pc);
+
+        const dc = pc.createDataChannel('luzhanqi');
+        setupDataChannel(dc);
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await waitIceComplete(pc);
+
+        const offerCode = encodeDesc(pc.localDescription);
+        gameState.roomCode = offerCode;
+
+        // 放到網址 hash 方便分享
+        const shareUrl = `${location.origin}${location.pathname}#join=${offerCode}`;
+        history.replaceState({}, '', shareUrl);
+
+        showLobby();
+        updateConnectionStatus();
+        updateLobbyUI();
+        showToast('房間已建立！請分享房間代碼或連結');
+      } catch (e) {
+        console.error(e);
+        showToast('建立房間失敗：' + (e?.message || '未知錯誤'));
+        backToHome();
+      } finally {
+        btn.innerHTML = '<span>🏠 建立房間</span>';
+        btn.disabled = false;
+      }
+    }
+
+    async function joinRoom(offerCode) {
+      // Guest（藍方）
+      safeCloseRTC();
+      selectedCell = null;
+      validMoves = [];
+
+      gameState = resetState();
+      gameState.role = 'guest';
+      gameState.myColor = 'blue';
+      gameState.myPlayerId = generatePlayerId();
+      gameState.players.blue = { id: gameState.myPlayerId, ready: false };
+      gameState.phase = 'waiting';
+
+      try {
+        const offer = decodeDesc(offerCode);
+
+        const pc = new RTCPeerConnection(RTC_CONFIG);
+        gameState.pc = pc;
+        setupPeerCommon(pc);
+
+        pc.ondatachannel = (ev) => {
+          setupDataChannel(ev.channel);
+          updateConnectionStatus();
+        };
+
+        await pc.setRemoteDescription(offer);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await waitIceComplete(pc);
+
+        const answerCode = encodeDesc(pc.localDescription);
+        gameState.answerCode = answerCode;
+
+        // 不修改 hash（避免把 answer 直接覆蓋掉 join 連結）
+        showLobby();
+        updateConnectionStatus();
+        updateLobbyUI();
+        showToast('已產生回傳碼！請傳給建立房間者');
+      } catch (e) {
+        console.error(e);
+        showToast('加入失敗：' + (e?.message || '未知錯誤'));
+        backToHome();
+      }
+    }
+
+    async function applyAnswerCode(answerCode) {
+      if (!isHost()) return;
+      if (!gameState.pc) return;
+
+      const pc = gameState.pc;
+      try {
+        const answer = decodeDesc(answerCode);
+        await pc.setRemoteDescription(answer);
+        showToast('已套用回傳碼，等待連線建立...');
+        updateConnectionStatus();
+      } catch (e) {
+        console.error(e);
+        showToast('回傳碼無效：' + (e?.message || '未知錯誤'));
+      }
+    }
+
+    function applyAnswerFromUI() {
+      const code = document.getElementById('answerInput').value.trim();
+      if (!code) return showToast('請貼上回傳碼');
+      applyAnswerCode(code);
+    }
+
+    function joinRoomByCode() {
+      const code = document.getElementById('roomCodeInput').value.trim();
+      if (!code) return;
+      hideJoinModal();
+      joinRoom(code);
+    }
+
+    // ==================== Lobby / UI ====================
+    function showLobby() {
+      document.getElementById('homePage').classList.add('hidden');
+      document.getElementById('lobbyPage').classList.remove('hidden');
+      document.getElementById('gamePage').classList.add('hidden');
+
+      // 顯示 offer/answer 區塊
+      const offerArea = document.getElementById('offerArea');
+      const answerArea = document.getElementById('answerArea');
+      offerArea.classList.toggle('hidden', !isHost());
+      answerArea.classList.toggle('hidden', isHost());
+
+      if (isHost()) {
+        document.getElementById('roomCodeDisplay').value = gameState.roomCode || '';
+      } else {
+        document.getElementById('answerCodeDisplay').value = gameState.answerCode || '';
+      }
+
+      updateConnectionStatus();
+      updateLobbyUI();
+    }
+
+    function showGame() {
+      document.getElementById('homePage').classList.add('hidden');
+      document.getElementById('lobbyPage').classList.add('hidden');
+      document.getElementById('gamePage').classList.remove('hidden');
+
+      // roomCode 可能很長，只顯示短識別
+      const shortId = (isHost() ? gameState.roomCode : (location.hash || '')).toString();
+      document.getElementById('gameRoomCode').textContent = shortId ? `連線: ${shortId.slice(0, 10)}...` : '';
+      updateGameUI();
+    }
+
+    function updateConnectionStatus() {
+      const el = document.getElementById('connectionStatus');
+      const pc = gameState.pc;
+      const connected = gameState.connected && gameState.dc && gameState.dc.readyState === 'open';
+
+      if (!pc) {
+        el.textContent = '未建立連線';
+        el.className = 'text-sm font-medium text-gray-500';
+        return;
+      }
+
+      if (connected) {
+        el.textContent = '✅ 已連線';
+        el.className = 'text-sm font-medium text-green-700';
+        return;
+      }
+
+      const state = pc.connectionState || 'connecting';
+      el.textContent = `⏳ 連線中 (${state})`;
+      el.className = 'text-sm font-medium text-amber-700';
+    }
+
+    function updateLobbyUI() {
+      const redStatus = document.getElementById('redStatus');
+      const blueStatus = document.getElementById('blueStatus');
+      const lobbyStatus = document.getElementById('lobbyStatus');
+      const myColorDisplay = document.getElementById('myColorDisplay');
+      const readyBtn = document.getElementById('readyBtn');
+
+      if (gameState.myColor === 'red') {
+        myColorDisplay.innerHTML = '你是 <span class="text-red-600">🔴 紅方</span>';
+      } else if (gameState.myColor === 'blue') {
+        myColorDisplay.innerHTML = '你是 <span class="text-blue-600">🔵 藍方</span>';
+      } else {
+        myColorDisplay.textContent = '';
+      }
+
+      // players may be null before hello
+      if (gameState.players.red) {
+        redStatus.textContent = gameState.players.red.ready ? '✅ 已準備' : '⏳ 等待準備';
+        redStatus.className = gameState.players.red.ready ? 'text-sm text-green-600 font-medium' : 'text-sm text-gray-600';
+      } else {
+        redStatus.textContent = '等待中...';
+        redStatus.className = 'text-sm text-gray-400';
+      }
+
+      if (gameState.players.blue) {
+        blueStatus.textContent = gameState.players.blue.ready ? '✅ 已準備' : '⏳ 等待準備';
+        blueStatus.className = gameState.players.blue.ready ? 'text-sm text-green-600 font-medium' : 'text-sm text-gray-600';
+      } else {
+        blueStatus.textContent = '等待加入...';
+        blueStatus.className = 'text-sm text-gray-400';
+      }
+
+      const bothPresent = !!(gameState.players.red && gameState.players.blue);
+      const connected = gameState.connected && gameState.dc && gameState.dc.readyState === 'open';
+
+      // ready button
+      if (bothPresent && connected) {
+        readyBtn.classList.remove('hidden');
+        const me = gameState.players[gameState.myColor];
+        if (me?.ready) {
+          readyBtn.textContent = '❌ 取消準備';
+          readyBtn.className = 'bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 px-8 rounded-xl shadow-lg';
+        } else {
+          readyBtn.textContent = '✅ 準備就緒';
+          readyBtn.className = 'bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-8 rounded-xl shadow-lg';
+        }
+      } else {
+        readyBtn.classList.add('hidden');
+      }
+
+      // lobbyStatus
+      if (isHost()) {
+        if (!connected) {
+          lobbyStatus.textContent = '請分享「房間代碼/連結」給對手，並等待對手傳回回傳碼（Answer）';
+          lobbyStatus.className = 'bg-yellow-100 text-yellow-800 px-4 py-2 rounded-lg mb-4 text-center w-full max-w-md';
+        } else if (!bothPresent) {
+          lobbyStatus.textContent = '已連線，等待對手確認身分...';
+          lobbyStatus.className = 'bg-blue-100 text-blue-800 px-4 py-2 rounded-lg mb-4 text-center w-full max-w-md';
+        } else {
+          if (gameState.players.red.ready && gameState.players.blue.ready) {
+            lobbyStatus.textContent = '雙方已準備，遊戲開始中...';
+            lobbyStatus.className = 'bg-green-100 text-green-800 px-4 py-2 rounded-lg mb-4 text-center w-full max-w-md';
+          } else {
+            lobbyStatus.textContent = '等待雙方準備...';
+            lobbyStatus.className = 'bg-blue-100 text-blue-800 px-4 py-2 rounded-lg mb-4 text-center w-full max-w-md';
+          }
+        }
+      } else {
+        if (!connected) {
+          lobbyStatus.textContent = '請把「回傳碼（Answer）」傳給建立房間的玩家（紅方）完成連線';
+          lobbyStatus.className = 'bg-yellow-100 text-yellow-800 px-4 py-2 rounded-lg mb-4 text-center w-full max-w-md';
+        } else if (!bothPresent) {
+          lobbyStatus.textContent = '已連線，等待房主同步房間狀態...';
+          lobbyStatus.className = 'bg-blue-100 text-blue-800 px-4 py-2 rounded-lg mb-4 text-center w-full max-w-md';
+        } else {
+          if (gameState.players.red.ready && gameState.players.blue.ready) {
+            lobbyStatus.textContent = '雙方已準備，遊戲開始中...';
+            lobbyStatus.className = 'bg-green-100 text-green-800 px-4 py-2 rounded-lg mb-4 text-center w-full max-w-md';
+          } else {
+            lobbyStatus.textContent = '等待雙方準備...';
+            lobbyStatus.className = 'bg-blue-100 text-blue-800 px-4 py-2 rounded-lg mb-4 text-center w-full max-w-md';
+          }
+        }
+      }
+    }
+
+    function updateGameUI() {
+      const turnIndicator = document.getElementById('turnIndicator');
+      const myColorBadge = document.getElementById('myColorBadge');
+      const gameMessage = document.getElementById('gameMessage');
+
+      if (gameState.currentTurn === 'red') {
+        turnIndicator.textContent = '🔴 紅方回合';
+        turnIndicator.className = 'text-sm font-bold px-3 py-1 rounded-full bg-red-100 text-red-700';
+      } else {
+        turnIndicator.textContent = '🔵 藍方回合';
+        turnIndicator.className = 'text-sm font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-700';
+      }
+
+      if (gameState.myColor === 'red') {
+        myColorBadge.textContent = '紅方';
+        myColorBadge.className = 'text-xs font-bold px-2 py-1 rounded bg-red-600 text-white';
+      } else {
+        myColorBadge.textContent = '藍方';
+        myColorBadge.className = 'text-xs font-bold px-2 py-1 rounded bg-blue-600 text-white';
+      }
+
+      if (gameState.phase === 'playing') {
+        if (gameState.currentTurn === gameState.myColor) {
+          gameMessage.textContent = isHost() || gameState.myColor === 'red'
+            ? '輪到你了！選擇棋子移動'
+            : '輪到你了！選擇棋子移動（動作會送到房主）';
+          gameMessage.className = 'text-center py-2 px-4 rounded-lg mb-2 text-sm font-medium bg-green-100 text-green-700';
+        } else {
+          gameMessage.textContent = '等待對手行動...';
+          gameMessage.className = 'text-center py-2 px-4 rounded-lg mb-2 text-sm font-medium bg-gray-100 text-gray-600';
+        }
+      }
+
+      const capturedDiv = document.getElementById('capturedPieces');
+      capturedDiv.innerHTML = '';
+      const allCaptured = [...(gameState.captured.red || []), ...(gameState.captured.blue || [])];
+      allCaptured.forEach(piece => {
+        const span = document.createElement('span');
+        span.className = `text-xs px-1 rounded ${piece.color === 'red' ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`;
+        span.textContent = piece.name;
+        capturedDiv.appendChild(span);
+      });
+    }
+
+    function showJoinModal() {
+      document.getElementById('joinModal').classList.remove('hidden');
+      document.getElementById('roomCodeInput').focus();
+    }
+
+    function hideJoinModal() {
+      document.getElementById('joinModal').classList.add('hidden');
+    }
+
+    function showToast(message) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.classList.remove('hidden');
+      setTimeout(() => toast.classList.add('hidden'), 2500);
+    }
+
+    async function copyText(text) {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch {}
+      // fallback
+      window.prompt('請複製以下文字：', text);
+      return false;
+    }
+
+    function copyRoomCode() {
+      if (!gameState.roomCode) return;
+      copyText(gameState.roomCode);
+      showToast('房間代碼已提供複製');
+    }
+
+    function copyAnswerCode() {
+      if (!gameState.answerCode) return;
+      copyText(gameState.answerCode);
+      showToast('回傳碼已提供複製');
+    }
+
+    function copyShareLink() {
+      if (!isHost() || !gameState.roomCode) {
+        // guest 就分享目前網址
+        copyText(location.href);
+        showToast('連結已提供複製');
+        return;
+      }
+      const url = `${location.origin}${location.pathname}#join=${gameState.roomCode}`;
+      if (navigator.share) {
+        navigator.share({ title: '軍棋對戰邀請', text: '來和我一起玩軍棋吧！', url }).catch(() => {
+          copyText(url);
+          showToast('連結已提供複製');
+        });
+      } else {
+        copyText(url);
+        showToast('連結已提供複製');
+      }
+    }
+
+    function backToLobby() {
+      // 遊戲中返回大廳（不斷線）
+      document.getElementById('gameOverModal').classList.add('hidden');
+      showLobby();
+    }
+
+    function backToHome() {
+      safeCloseRTC();
+      gameState = resetState();
+      selectedCell = null;
+      validMoves = [];
+
+      history.replaceState({}, '', location.pathname);
+      document.getElementById('gameOverModal').classList.add('hidden');
+      document.getElementById('homePage').classList.remove('hidden');
+      document.getElementById('lobbyPage').classList.add('hidden');
+      document.getElementById('gamePage').classList.add('hidden');
+
+      // 清空 input
+      const ai = document.getElementById('answerInput');
+      if (ai) ai.value = '';
+      const ri = document.getElementById('roomCodeInput');
+      if (ri) ri.value = '';
+    }
+
+    // ==================== Ready / Start Game ====================
+    function toggleReady() {
+      if (!gameState.players[gameState.myColor]) return;
+
+      const next = !gameState.players[gameState.myColor].ready;
+      gameState.players[gameState.myColor].ready = next;
+      updateLobbyUI();
+
+      if (isHost()) {
+        if (gameState.players.red?.ready && gameState.players.blue?.ready) {
+          startGameHost();
+        } else {
+          gameState.phase = 'waiting';
+          broadcastState();
+        }
+      } else {
+        // guest 通知 host
+        sendNet({ type: 'ready', color: 'blue', ready: next });
+      }
+    }
+
+    function startGameHost() {
+      if (!isHost()) return;
+      const board = createEmptyBoard();
+      placePiecesRandomly(board, generateInitialPieces('red'), 'red');
+      placePiecesRandomly(board, generateInitialPieces('blue'), 'blue');
+
+      gameState.board = board;
+      gameState.phase = 'playing';
+      gameState.currentTurn = 'red';
+      gameState.winner = null;
+      gameState.captured = { red: [], blue: [] };
+
+      broadcastState();
+      showGame();
+      renderBoard();
+      updateGameUI();
+    }
+
+    // ==================== 棋盤與棋子 ====================
+    function createEmptyBoard() {
+      const board = [];
+      for (let y = 0; y < 12; y++) {
+        board[y] = [];
+        for (let x = 0; x < 5; x++) board[y][x] = null;
+      }
+      return board;
+    }
+
+    function generateInitialPieces(color) {
+      const pieces = [];
+      Object.entries(PIECE_TYPES).forEach(([type, info]) => {
+        for (let i = 0; i < info.count; i++) {
+          pieces.push({
+            type,
+            name: info.name,
+            rank: info.rank,
+            color,
+            special: info.special || null,
+            immovable: info.immovable || false
+          });
+        }
+      });
+      return pieces;
+    }
+
+    function placePiecesRandomly(board, pieces, color) {
+      const startRow = color === 'red' ? 0 : 6;
+      const endRow = color === 'red' ? 6 : 12;
+
+      const positions = [];
+      for (let y = startRow; y < endRow; y++) {
+        for (let x = 0; x < 5; x++) positions.push({x, y});
+      }
+      shuffleArray(positions);
+
+      // 軍旗必須放在大本營
+      const flagPiece = pieces.find(p => p.special === 'flag');
+      const hqPositions = color === 'red' ? [{x:1, y:0}, {x:3, y:0}] : [{x:1, y:11}, {x:3, y:11}];
+      const flagPos = hqPositions[Math.floor(Math.random() * 2)];
+      board[flagPos.y][flagPos.x] = { ...flagPiece };
+
+      const usedPositions = new Set([`${flagPos.x},${flagPos.y}`]);
+
+      // 地雷只能放在後兩排
+      const minePieces = pieces.filter(p => p.special === 'mine');
+      const mineRows = color === 'red' ? [0, 1] : [10, 11];
+      const minePositions = [];
+      for (const y of mineRows) {
+        for (let x = 0; x < 5; x++) {
+          if (!isHeadquarters(x, y) && !usedPositions.has(`${x},${y}`)) minePositions.push({x, y});
+        }
+      }
+      shuffleArray(minePositions);
+      minePieces.forEach((piece, i) => {
+        if (minePositions[i]) {
+          const pos = minePositions[i];
+          board[pos.y][pos.x] = { ...piece };
+          usedPositions.add(`${pos.x},${pos.y}`);
+        }
+      });
+
+      // 炸彈不能放在第一排
+      const bombPieces = pieces.filter(p => p.special === 'bomb');
+      const bombRows = color === 'red' ? [1, 2, 3, 4, 5] : [6, 7, 8, 9, 10];
+      const bombPositions = [];
+      for (const y of bombRows) {
+        for (let x = 0; x < 5; x++) {
+          if (!usedPositions.has(`${x},${y}`) && !isCamp(x, y)) bombPositions.push({x, y});
+        }
+      }
+      shuffleArray(bombPositions);
+      bombPieces.forEach((piece, i) => {
+        if (bombPositions[i]) {
+          const pos = bombPositions[i];
+          board[pos.y][pos.x] = { ...piece };
+          usedPositions.add(`${pos.x},${pos.y}`);
+        }
+      });
+
+      // 其他棋子
+      const otherPieces = pieces.filter(p => !p.special || (p.special !== 'flag' && p.special !== 'mine' && p.special !== 'bomb'));
+      const remainingPositions = positions.filter(p => !usedPositions.has(`${p.x},${p.y}`) && !isCamp(p.x, p.y));
+      otherPieces.forEach((piece, i) => {
+        if (remainingPositions[i]) {
+          const pos = remainingPositions[i];
+          board[pos.y][pos.x] = { ...piece };
+        }
+      });
+    }
+
+    function shuffleArray(array) {
+      for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+      }
+    }
+
+    function renderBoard() {
+      const boardDiv = document.getElementById('board');
+      boardDiv.innerHTML = '';
+
+      const flipped = gameState.myColor === 'blue';
+
+      for (let displayY = 0; displayY < 12; displayY++) {
+        for (let displayX = 0; displayX < 5; displayX++) {
+          const actualY = flipped ? 11 - displayY : displayY;
+          const actualX = flipped ? 4 - displayX : displayX;
+
+          const cell = document.createElement('div');
+          cell.dataset.x = actualX;
+          cell.dataset.y = actualY;
+
+          let bgClass = 'bg-amber-100';
+          let extraClass = '';
+
+          if (isCamp(actualX, actualY)) {
+            bgClass = 'bg-green-200';
+            extraClass = 'camp';
+          } else if (isHeadquarters(actualX, actualY)) {
+            bgClass = 'bg-yellow-300';
+            extraClass = 'headquarters';
+          }
+
+          let railwayClass = '';
+          if (isRailway(actualX, actualY)) {
+            if ((actualX === 0 || actualX === 4) && (actualY === 1 || actualY === 5 || actualY === 6 || actualY === 10)) {
+              railwayClass = 'railway-cross';
+            } else if (actualX === 0 || actualX === 4) {
+              railwayClass = 'railway-v';
+            } else if (actualY === 1 || actualY === 5 || actualY === 6 || actualY === 10) {
+              railwayClass = 'railway-h';
+            }
+          }
+
+          cell.className = `relative aspect-square flex items-center justify-center rounded cursor-pointer ${bgClass} ${extraClass} ${railwayClass}`;
+
+          if (selectedCell && selectedCell.x === actualX && selectedCell.y === actualY) {
+            cell.classList.add('ring-4', 'ring-yellow-400');
+          }
+
+          if (validMoves.some(m => m.x === actualX && m.y === actualY)) {
+            cell.classList.add('ring-2', 'ring-green-500', 'cell-highlight');
+          }
+
+          const piece = gameState.board[actualY]?.[actualX];
+          if (piece) {
+            const pieceDiv = document.createElement('div');
+            const isMyPiece = piece.color === gameState.myColor;
+
+            let pieceText = '?';
+            let pieceBg = piece.color === 'red' ? 'bg-red-500' : 'bg-blue-500';
+            let textColor = 'text-white';
+
+            if (isMyPiece) {
+              pieceText = piece.name;
+              if (piece.special === 'flag') {
+                pieceBg = piece.color === 'red' ? 'bg-red-700' : 'bg-blue-700';
+              } else if (piece.special === 'bomb') {
+                pieceBg = 'bg-orange-500';
+              } else if (piece.special === 'mine') {
+                pieceBg = 'bg-gray-600';
+              }
+            }
+
+            pieceDiv.className = `piece w-10 h-10 sm:w-12 sm:h-12 ${pieceBg} ${textColor} rounded-full flex items-center justify-center text-xs sm:text-sm font-bold shadow-md border-2 border-white/30`;
+            pieceDiv.textContent = pieceText;
+
+            if (selectedCell && selectedCell.x === actualX && selectedCell.y === actualY) {
+              pieceDiv.classList.add('ring-4', 'ring-yellow-400', 'scale-110');
+            }
+
+            cell.appendChild(pieceDiv);
+          }
+
+          cell.addEventListener('click', () => handleCellClick(actualX, actualY));
+          boardDiv.appendChild(cell);
+        }
+      }
+    }
+
+    function handleCellClick(x, y) {
+      if (gameState.phase !== 'playing') return;
+      if (gameState.currentTurn !== gameState.myColor) {
+        showToast('還沒輪到你！');
+        return;
+      }
+
+      const clickedPiece = gameState.board[y]?.[x];
+
+      if (validMoves.some(m => m.x === x && m.y === y)) {
+        if (isHost()) {
+          hostTryMove(selectedCell.x, selectedCell.y, x, y, gameState.myColor);
+        } else {
+          // guest：送出 move request
+          sendNet({ type: 'move', color: 'blue', from: {x: selectedCell.x, y: selectedCell.y}, to: {x, y} });
+          showToast('已送出移動，等待房主處理...');
+        }
+
+        selectedCell = null;
+        validMoves = [];
+        renderBoard();
+        return;
+      }
+
+      if (clickedPiece && clickedPiece.color === gameState.myColor) {
+        if (clickedPiece.immovable) {
+          showToast('此棋子不能移動');
+          selectedCell = null;
+          validMoves = [];
+          renderBoard();
+          return;
+        }
+
+        selectedCell = { x, y };
+        validMoves = calculateValidMoves(x, y, clickedPiece);
+        renderBoard();
+        return;
+      }
+
+      selectedCell = null;
+      validMoves = [];
+      renderBoard();
+    }
+
+    function calculateValidMoves(fromX, fromY, piece) {
+      const moves = [];
+      if (piece.immovable) return moves;
+
+      const isOnRailway = isRailway(fromX, fromY);
+      const isEngineer = piece.special === 'engineer';
+      const directions = [{dx: 0, dy: -1}, {dx: 0, dy: 1}, {dx: -1, dy: 0}, {dx: 1, dy: 0}];
+
+      // 普通移動（一格）
+      for (const dir of directions) {
+        const nx = fromX + dir.dx;
+        const ny = fromY + dir.dy;
+        if (nx >= 0 && nx < 5 && ny >= 0 && ny < 12) {
+          if (canMoveTo(fromX, fromY, nx, ny, piece)) moves.push({ x: nx, y: ny });
+        }
+      }
+
+      // 鐵路移動（多格直線）
+      if (isOnRailway) {
+        for (const dir of directions) {
+          let nx = fromX + dir.dx;
+          let ny = fromY + dir.dy;
+          while (nx >= 0 && nx < 5 && ny >= 0 && ny < 12) {
+            if (!isRailway(nx, ny)) break;
+
+            const targetPiece = gameState.board[ny]?.[nx];
+            if (targetPiece) {
+              if (targetPiece.color !== piece.color && !isCamp(nx, ny)) {
+                if (!moves.some(m => m.x === nx && m.y === ny)) moves.push({ x: nx, y: ny });
+              }
+              break;
+            }
+
+            if (!moves.some(m => m.x === nx && m.y === ny)) moves.push({ x: nx, y: ny });
+            nx += dir.dx;
+            ny += dir.dy;
+          }
+        }
+
+        // 工兵可拐彎
+        if (isEngineer) {
+          const visited = new Set([`${fromX},${fromY}`]);
+          const queue = [{x: fromX, y: fromY}];
+
+          while (queue.length > 0) {
+            const current = queue.shift();
+            for (const dir of directions) {
+              const nx = current.x + dir.dx;
+              const ny = current.y + dir.dy;
+              const key = `${nx},${ny}`;
+
+              if (nx >= 0 && nx < 5 && ny >= 0 && ny < 12 && !visited.has(key)) {
+                if (isRailway(nx, ny)) {
+                  visited.add(key);
+                  const targetPiece = gameState.board[ny]?.[nx];
+
+                  if (!targetPiece) {
+                    queue.push({x: nx, y: ny});
+                    if (!moves.some(m => m.x === nx && m.y === ny)) moves.push({ x: nx, y: ny });
+                  } else if (targetPiece.color !== piece.color && !isCamp(nx, ny)) {
+                    if (!moves.some(m => m.x === nx && m.y === ny)) moves.push({ x: nx, y: ny });
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      return moves;
+    }
+
+    function canMoveTo(fromX, fromY, toX, toY, piece) {
+      if (toX < 0 || toX >= 5 || toY < 0 || toY >= 12) return false;
+      const targetPiece = gameState.board[toY]?.[toX];
+
+      // 不能吃自己的棋子
+      if (targetPiece && targetPiece.color === piece.color) return false;
+
+      // 行營中的棋子不能被攻擊
+      if (targetPiece && isCamp(toX, toY)) return false;
+
+      // 不能進入自己的大本營（一般規則：大本營不可進入；此處沿用原始程式限制）
+      if (piece.color === 'red' && isRedHeadquarters(toX, toY)) {
+        if (gameState.board[toY][toX]?.special === 'flag') return false;
+      }
+      if (piece.color === 'blue' && isBlueHeadquarters(toX, toY)) {
+        if (gameState.board[toY][toX]?.special === 'flag') return false;
+      }
+
+      return true;
+    }
+
+    // Host-only move application
+    function hostTryMove(fromX, fromY, toX, toY, moverColor) {
+      if (!isHost()) return;
+      if (gameState.phase !== 'playing') return;
+      if (gameState.currentTurn !== moverColor) return;
+
+      const piece = gameState.board[fromY]?.[fromX];
+      if (!piece || piece.color !== moverColor) return;
+      if (piece.immovable) return;
+
+      const moves = calculateValidMoves(fromX, fromY, piece);
+      if (!moves.some(m => m.x === toX && m.y === toY)) return;
+
+      hostApplyMove(fromX, fromY, toX, toY);
+    }
+
+    function hostApplyMove(fromX, fromY, toX, toY) {
+      const piece = gameState.board[fromY][fromX];
+      const targetPiece = gameState.board[toY]?.[toX];
+
+      let battleResult = null;
+      if (targetPiece) battleResult = resolveBattle(piece, targetPiece);
+
+      gameState.board[fromY][fromX] = null;
+
+      if (!targetPiece) {
+        gameState.board[toY][toX] = piece;
+      } else {
+        if (battleResult === 'win') {
+          gameState.board[toY][toX] = piece;
+          gameState.captured[targetPiece.color].push(targetPiece);
+        } else if (battleResult === 'lose') {
+          gameState.board[toY][toX] = targetPiece;
+          gameState.captured[piece.color].push(piece);
+        } else if (battleResult === 'draw') {
+          gameState.board[toY][toX] = null;
+          gameState.captured[piece.color].push(piece);
+          gameState.captured[targetPiece.color].push(targetPiece);
+        } else if (battleResult === 'flag_captured') {
+          gameState.board[toY][toX] = piece;
+          gameState.winner = piece.color;
+          gameState.phase = 'ended';
+        }
+      }
+
+      if (gameState.phase !== 'ended') checkWinCondition();
+
+      if (gameState.phase === 'playing') {
+        gameState.currentTurn = gameState.currentTurn === 'red' ? 'blue' : 'red';
+      }
+
+      // host 本地 UI
+      renderBoard();
+      updateGameUI();
+
+      // 廣播狀態
+      broadcastState();
+
+      if (gameState.phase === 'ended') {
+        setTimeout(() => showGameOver(gameState.winner), 200);
+      }
+    }
+
+    function resolveBattle(attacker, defender) {
+      if (defender.special === 'flag') return 'flag_captured';
+      if (attacker.special === 'bomb' || defender.special === 'bomb') return 'draw';
+
+      if (defender.special === 'mine') {
+        if (attacker.special === 'engineer') return 'win';
+        return 'lose';
+      }
+
+      if (attacker.rank > defender.rank) return 'win';
+      if (attacker.rank < defender.rank) return 'lose';
+      return 'draw';
+    }
+
+    function checkWinCondition() {
+      const colors = ['red', 'blue'];
+      for (const color of colors) {
+        let hasMovablePiece = false;
+        let hasFlag = false;
+
+        for (let y = 0; y < 12; y++) {
+          for (let x = 0; x < 5; x++) {
+            const piece = gameState.board[y]?.[x];
+            if (piece && piece.color === color) {
+              if (piece.special === 'flag') hasFlag = true;
+              if (!piece.immovable) {
+                const moves = calculateValidMoves(x, y, piece);
+                if (moves.length > 0) hasMovablePiece = true;
+              }
+            }
+          }
+        }
+
+        if (!hasFlag) {
+          gameState.winner = color === 'red' ? 'blue' : 'red';
+          gameState.phase = 'ended';
+          return;
+        }
+
+        if (!hasMovablePiece) {
+          gameState.winner = color === 'red' ? 'blue' : 'red';
+          gameState.phase = 'ended';
+          return;
+        }
+      }
+    }
+
+    function showGameOver(winner) {
+      const modal = document.getElementById('gameOverModal');
+      const icon = document.getElementById('gameOverIcon');
+      const title = document.getElementById('gameOverTitle');
+      const message = document.getElementById('gameOverMessage');
+
+      if (!winner) return;
+
+      if (winner === gameState.myColor) {
+        icon.textContent = '🏆';
+        title.textContent = '恭喜獲勝！';
+        title.className = 'text-2xl font-bold mb-2 text-green-600';
+        message.textContent = '你成功奪取了敵方軍旗！';
+      } else {
+        icon.textContent = '😢';
+        title.textContent = '你輸了';
+        title.className = 'text-2xl font-bold mb-2 text-red-600';
+        message.textContent = '敵方奪取了你的軍旗！';
+      }
+
+      modal.classList.remove('hidden');
+    }
+
+    // ==================== 工具函數 / init ====================
+    function generatePlayerId() { return Math.random().toString(36).substring(2, 10); }
+
+    function initFromUrl() {
+      // 支援 #join=... 或 ?join=... / ?room=...
+      const hash = location.hash.startsWith('#') ? location.hash.substring(1) : '';
+      const hashParams = new URLSearchParams(hash);
+      const offerFromHash = hashParams.get('join');
+
+      const queryParams = new URLSearchParams(location.search);
+      const offerFromQuery = queryParams.get('join') || queryParams.get('room') || queryParams.get('offer');
+
+      const offer = offerFromHash || offerFromQuery;
+      if (offer) {
+        // 自動加入
+        joinRoom(offer);
+      }
+    }
+
+    // 防止在離開頁面時保留連線
+    window.addEventListener('beforeunload', () => safeCloseRTC());
+
+    // 初始化
+    initFromUrl();
+  </script>
+</body>
+</html>
